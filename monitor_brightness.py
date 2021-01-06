@@ -9,14 +9,42 @@ Requirements:
 import re
 import subprocess
 import argparse
+import os.path
+import json
 
 from collections import namedtuple
 
 
-LAPTOP_MONITOR = "eDP-1"
-SUDO = "sudo"
+LAPTOP_MONITOR = "eDP1"
+SUDO = ["sudo"]
+FEATURE_LOOKUP_FILE = "~/.cache/monitor_brightness"
 
 Monitor = namedtuple("Monitor", ["name", "EDID"])
+
+import time
+starttime = None
+def pt(s):
+    global starttime
+    if starttime is None:
+        starttime = time.time()
+    print(f"{time.time()-starttime}:\t{s}")
+
+
+g_feature_lookup = {}
+def load_feature_lookup():
+    global g_feature_lookup
+    if FEATURE_LOOKUP_FILE and os.path.isfile(os.path.expanduser(FEATURE_LOOKUP_FILE)):
+        with open(os.path.expanduser(FEATURE_LOOKUP_FILE)) as f:
+            s = f.read()
+        try:
+            g_feature_lookup = json.loads(s)
+        except:
+            pass
+
+def flush_g_feature_lookup():
+    with open(os.path.expanduser(FEATURE_LOOKUP_FILE), "w+") as f:
+        f.write(json.dumps(g_feature_lookup))
+
 
 
 def get_active_monitor() -> Monitor:
@@ -41,28 +69,34 @@ def get_active_monitor() -> Monitor:
     for monitor in monitors:
         m = re.match(
             r"^([\w-]*) connected.* (\d+)x(\d+)\+(\d+)\+(\d+) .*$", monitor[0])
-        if m is not None:
+        if m:
             name, xlen, ylen, x0, y0 = m.groups()
-            if name == LAPTOP_MONITOR:
-                return Monitor(name, "")
-            name, xlen, ylen, x0, y0 = name, int(
-                xlen), int(ylen), int(x0), int(y0)
+      #      if name == LAPTOP_MONITOR:
+      #          matches.append(Monitor(name, ""))
+            name, xlen, ylen, x0, y0 = name, int(xlen), int(ylen), int(x0), int(y0)
             if x0 <= x < x0+xlen and y0 <= y < y0+ylen:
                 pos1 = [i for (i, line) in enumerate(monitor)
                         if line.strip() == "EDID:"][0] + 1
                 pos2 = [i for (i, line) in enumerate(monitor) if not re.match(
                     r"[0-9a-f]{32}", line.strip()) and i > pos1][0]
                 edid = "".join(line.strip() for line in monitor[pos1:pos2])
-                return Monitor(name=name, EDID=edid)
+                matches.append(Monitor(name=name, EDID=edid))
+    if len(matches) > 1:
+        print("Warning, more than one match")
+    return matches[0]
 
 
 def get_brightness_feature(monitor: Monitor):
-    args = [SUDO, "ddcutil", "-e", monitor.EDID[:256], "capabilities"]
+    if monitor.EDID[:256] in g_feature_lookup:
+        return g_feature_lookup[monitor.EDID[:256]]
+    args = SUDO + ["ddcutil", "-e", monitor.EDID[:256], "capabilities"]
     r = subprocess.run(args, stdout=subprocess.PIPE)
     output = r.stdout.decode('utf-8')
     m = re.search(r"Feature: (\d+) \(Brightness\)", output)
     if m is not None:
         feature_val = int(m.groups()[0])
+        g_feature_lookup[monitor.EDID[:256]] = feature_val
+        flush_g_feature_lookup()
         return feature_val
 
 
@@ -73,8 +107,10 @@ def get_laptop():
 
 
 def get_ddc(monitor: Monitor):
+    #args = SUDO + ["ddcutil", "detect"]
+    #r = subprocess.run(args, stdout=subprocess.PIPE)
     feature = get_brightness_feature(monitor)
-    args = [SUDO, "ddcutil", "-e", monitor.EDID[:256], "getvcp", str(feature)]
+    args = SUDO + ["ddcutil", "-e", monitor.EDID[:256], "getvcp", str(feature)]
     r = subprocess.run(args, stdout=subprocess.PIPE)
     m = re.search(r"current\s+value\s*=\s*(\d*.?\d*),",
                   r.stdout.decode('utf-8'))
@@ -84,20 +120,26 @@ def get_ddc(monitor: Monitor):
 
 def get_brightness(monitor: Monitor):
     if monitor.name == LAPTOP_MONITOR:
-        return get_laptop()
+        pt("b4 get_laptop")
+        tmp = get_laptop()
+        pt("after get_laptop")
+        return tmp
     else:
-        return get_ddc(monitor)
+        pt("b4 get_ddc")
+        tmp = get_ddc(monitor)
+        pt("after get_ddc")
+        return tmp
 
 
 def set_laptop(value: int):
-    args = [SUDO, "light", "-S", str(value)]
+    args = SUDO + ["light", "-S", str(value)]
     subprocess.run(args)
 
 
 def set_ddc(monitor: Monitor, value: int):
     feature = get_brightness_feature(monitor)
-    subprocess.run([SUDO, "modprobe", "i2c-dev"])
-    args = [SUDO, "ddcutil", "-e", monitor.EDID[:256],
+    #subprocess.run([SUDO, "modprobe", "i2c-dev"])
+    args = SUDO + ["ddcutil", "-e", monitor.EDID[:256],
             "setvcp", str(feature), str(value)]
     subprocess.run(args, stdout=subprocess.PIPE)
 
@@ -110,12 +152,15 @@ def set_brightness(monitor: Monitor, value: int):
 
 
 def print_brightness_cli(args):
+    pt("b4 get_active_mon")
     monitor = get_active_monitor()
+    pt("after get_active_mon")
     print(get_brightness(monitor))
 
 
 def set_brightness_cli(args):
     monitor = get_active_monitor()
+    print(monitor)
     set_brightness(monitor, args.value)
 
 
@@ -140,6 +185,7 @@ def create_parser():
 
 
 def main():
+    load_feature_lookup()
     args = create_parser().parse_args()
     args.func(args)
 
